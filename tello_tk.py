@@ -1,27 +1,37 @@
-# coding=utf-8
 import threading
 import time
-from Queue import Queue
 import imutils
 import cv2
+import numpy as np
 
-import tello
+from easytello import Tello
 from pid import PID
-from darknet import darknet
-from simple_multi_tracker import SelectedTrackerManager
-from my_tracker.utils import pop_up_box
+from queue import Queue
+from object_detection.utils import label_map_util
+from simple_multi_tracker import SimpleMultiTracker
+from detection import DetectionModel, load_model, run_inference_for_single_image
+
+WAIT = 0
+DETECTING = 1
+TRACKING = 2
+INPUTTING = 3
 
 
 class TelloTracker:
-    def __init__(self, detect_model, tello, frame_width=512, skip_frames=20, confidence=0.4, output_video=None):
+    def __init__(self, detect_model, tello, frame_width=768, skip_frames=5, action_frames=10, confidence=0.4,
+                 frame_rate=30, pool_size=30, class_set=['toycar'], output_video=None):
         self.detect_model = detect_model
         self.tello = tello
         self.frame_width = frame_width
         self.skip_frames = skip_frames
         self.confidence = confidence
         self.output_video = output_video
+        self.frame_rate = frame_rate
+        self.action_frames = action_frames
+        self.class_set = class_set
+        self.pool_size = pool_size
 
-        self.frame = None
+        # self.frame = None
         self.init_area = None
         self.foward_pid = PID(setPoint=1.0, sample_time=0.3, P=50, I=10, D=20)
         # self.foward_pid = PID(setPoint=0.5, sample_time=0.3, P=100, I=20, D=40)
@@ -38,10 +48,13 @@ class TelloTracker:
         self.distance = 0.5
         self.degree = 10
 
-        self.vedio_thread = threading.Thread(target=self._videoLoop, args=())
-        self.vedio_thread.start()
+        self.video_thread = threading.Thread(target=self._videoLoop, args=())
+        # self.video_thread.daemon = True
+        self.video_thread.start()
 
-        self.sending_command_thread = threading.Thread(target=self._sendingCommand)
+        # self.battery_command_thread = threading.Thread(target=self._sendingCommand)
+        # self.battery_command_thread.daemon = True
+        # self.battery_command_thread.start()
 
     def _get_pooled_frame(self):
         if self.frame_pool.qsize() != 0:
@@ -52,18 +65,24 @@ class TelloTracker:
         a thread used to read frame from tello object
         """
         try:
-            time.sleep(0.5)
-            self.sending_command_thread.start()
+            # time.sleep(0.5)
+            # self.sending_command_thread.start()
             # self.sending_command_thread.start()
             while not self.stopEvent.is_set():
                 # read the frame for GUI show
                 # self.frame = np.array(self.tello.read()).astype(int)
-                frame = self.tello.read()
+                frame = self.tello.frame
                 if frame is None or frame.size == 0:
+                    # print('no frame!')
                     continue
-                self.frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                self.frame_pool.put(self.frame)
-                time.sleep(0.05)
+                # self.frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                # print('poll frame!')
+                if self.frame_pool.qsize() > self.pool_size:
+                    self.frame_pool.get()
+                    print('lost frame!')
+                self.frame_pool.put(frame)
+                # control frame rate
+                time.sleep(1 / self.frame_rate)
         except RuntimeError as e:
             print("[INFO] caught a RuntimeError")
 
@@ -73,7 +92,7 @@ class TelloTracker:
         """
         print("[INFO] closing...")
         self.stopEvent.set()
-        del self.tello
+        # del self.tello
 
     def _regionCheck(self, region, min=-50, max=50):
         if region < min:
@@ -82,14 +101,33 @@ class TelloTracker:
             region = max
         return int(region)
 
-    def track(self):
+    def _pid_init_lasttime(self):
+        self.foward_pid.init_last_time()
+        self.rotate_pid.init_last_time()
+
+    def _pid_clear(self):
+        self.foward_pid.clear()
+        self.rotate_pid.clear()
+
+    def _sendingCommand(self):
+        """
+        start a while loop that sends 'command' to tello every 30 second
+        """
+
+        while True:
+            self.tello.get_battery()
+            # self.tello.send_command('command')
+            time.sleep(30)
+
+    def track(self, verbose=True):
         # 初始要追踪的目标ID
-        selected_IDs = []
-        tm = SelectedTrackerManager(use_CF=True)
-        tracking = False
+        track_id = None
+        multi_tracker = SimpleMultiTracker(debug=verbose)
+        display_str = 'waiting'
+        mode = WAIT
         width, height = None, None
         writer = None
-        total_track_frames = 0
+        total_frames = 0
 
         # loop over frames from the video stream
         while True:
@@ -104,21 +142,20 @@ class TelloTracker:
             # if the frame dimensions are empty, set them
             if width is None or height is None:
                 (height, width) = frame.shape[:2]
-                # initialize the detect model so that there won't be much delay when detecting later
-                self.detect_model.performDetect(None, initOnly=True)
 
             # if we are supposed to be writing a video to disk, initialize the writer
             if self.output_video is not None and writer is None:
                 fourcc = cv2.VideoWriter_fourcc(*"MP4V")
-                writer = cv2.VideoWriter(self.output_video, fourcc, 20,
+                # fourcc = cv2.VideoWriter_fourcc(*"H264")
+                writer = cv2.VideoWriter(self.output_video, fourcc, 30,
                                          (width, height), True)
 
-            if tracking:
+            if mode != WAIT:
                 # check to see if we should run a more computationally expensive
                 # object detection method to aid our tracker
-                if total_track_frames % self.skip_frames == 0:
-                    raw_boxes, scores, classes = self.detect_model.performDetect(frame)
-                    # print(raw_boxes, scores, classes)
+                if total_frames % self.skip_frames == 0:
+                    raw_boxes, scores, classes = self.detect_model.detect(frame)
+                    print(scores[:5], classes[:5], raw_boxes[:5])
 
                     # loop over the detections
                     boxes = []
@@ -126,19 +163,35 @@ class TelloTracker:
                         # filter out weak detections by requiring a minimum onfidence
                         if scores[i] > self.confidence:
                             # if the class label is not a person, ignore it
-                            if classes[i] == "person":
+                            if classes[i] in self.class_set:
                                 boxes.append(raw_boxes[i])
 
-                    if total_track_frames == 0:
-                        rects = tm.init_manager(frame, boxes)
+                    if total_frames == 0:
+                        rects = multi_tracker.init_tracker(frame, boxes)
                     else:
-                        # match tracking objects and detected objects
-                        rects = tm.update_after_detection(frame, boxes)
-                else:
-                    # otherwise, we should utilize our object *trackers* rather than
-                    # object *detectors* to obtain a higher frame processing throughput
-                    rects = tm.update_trackers(frame)
+                        rects = multi_tracker.update_tracker(frame, boxes)
 
+                    if mode == TRACKING:
+                        if track_id not in multi_tracker.tracked:
+                            display_str = 'LOST TARGET'
+                            mode = DETECTING
+                        else:
+                            if multi_tracker.tracked[track_id]:
+                                # if tracked after detection, init a new single tracker
+                                multi_tracker.init_single_tracker(track_id, frame)
+                            else:
+                                multi_tracker.update_single_tracker(frame)
+                else:
+                    if mode == TRACKING:
+                        if track_id not in multi_tracker.tracked:
+                            display_str = 'LOST TARGET'
+                            mode = DETECTING
+                        else:
+                            multi_tracker.update_single_tracker(frame)
+                    rects = multi_tracker.appearing_boxes()
+
+                if verbose:
+                    multi_tracker.show_info('total frame:{}'.format(total_frames))
                 # draw rectangles of corresponding objects
                 for rect in rects.values():
                     (startX, startY, endX, endY) = rect
@@ -156,30 +209,12 @@ class TelloTracker:
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
                     cv2.circle(frame, (centroid[0], centroid[1]), 2, (0, 0, 255), -1)
 
-                # select an object to track
-                if total_track_frames == 0:
-                    cv2.imshow('frame', frame)
-                    selected_IDs.append(pop_up_box())
-                    tm.discard_unselected_IDs(selected_IDs)
                 # decide what action to choose
-                elif total_track_frames % 10 == 0:
-                    if len(rects) != 0:
-                        # there is only one box
-                        box = rects.values()[0]
+                if total_frames % self.action_frames == 0:
+                    box = multi_tracker.appearing_tracking_box()
+                    if box is not None:
                         (startX, startY, endX, endY) = box
                         area = (endX - startX) * (endY - startY)
-
-                        # print "area:%f" % area
-                        # print "x_ratio:%f,y_ratio:%f" % (x_ratio, y_ratio)
-                        # if x_ratio < 0.4:
-                        #     self.tello.rotate_ccw(self.degree)
-                        # elif x_ratio > 0.6:
-                        #     self.tello.rotate_cw(self.degree)
-                        #
-                        # if y_ratio < 0.4:
-                        #     self.tello.move_up(self.distance)
-                        # elif y_ratio > 0.6:
-                        #     self.tello.move_down(self.distance)
 
                         if self.init_area is None:
                             # it's the first time to get a box, so we record it as a target for later use.
@@ -199,25 +234,18 @@ class TelloTracker:
                             self.rotate = self.rotate_pid.update(1 - x_ratio, cur_time)
 
                             if self.foward_speed is not None and self.horizontal_speed is not None:
-                                self.tello.set_control(foward_speed=self._regionCheck(self.foward_speed),
-                                                       rotate=self._regionCheck(self.rotate))
-                            # if area_ratio < 0.8:
-                            #     self.tello.move_forward(self.distance)
-                            # elif area_ratio > 1.2:
-                            #     self.tello.move_backward(self.distance)
+                                self.tello.control(foward_speed=self._regionCheck(self.foward_speed),
+                                                   rotate=self._regionCheck(self.rotate))
                     else:
                         # no tracking object, stop any moving
-                        self.tello.set_control()
+                        self.tello.control()
                         self._pid_clear()
                         self._pid_init_lasttime()
 
                 # increment the total number of frames processed thus far
-                total_track_frames += 1
+                total_frames += 1
 
-            # check to see if we should write the frame to disk
-            if writer is not None:
-                writer.write(frame)
-
+            cv2.putText(frame, display_str, (0, 30), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 2)
             # show the output frame
             cv2.imshow('frame', frame)
 
@@ -225,33 +253,49 @@ class TelloTracker:
             key = cv2.waitKey(1) & 0xFF
             if key == ord("q"):
                 break
-            elif key == ord("s"):
-                tracking = True
+            elif key == 32:
+                # space key
+                mode = DETECTING
+                display_str = 'DETECTING'
+            elif key == 13:
+                # enter key
+                if mode == DETECTING:
+                    mode = INPUTTING
+                    display_str = 'INPUTTING:'
+                elif mode == INPUTTING:
+                    track_id = int(display_str.split(':')[-1])
+                    mode = TRACKING
+                    display_str = 'TRACKING:{}'.format(track_id)
+                    if track_id in multi_tracker.tracked.keys():
+                        multi_tracker.init_single_tracker(track_id, frame)
+                    else:
+                        mode = DETECTING
+                        display_str = 'NO SUCH ID'
+            elif ord('0') <= key <= ord('9') and mode == INPUTTING:
+                num = key - ord('0')
+                display_str += str(num)
             elif key == ord("t"):
                 self.tello.takeoff()
-            elif key == ord("u"):
-                self.tello.move_up(self.distance)
+            elif key == ord("w"):
+                self.tello.forward(20)
+            elif key == ord("a"):
+                self.tello.ccw(30)
+            elif key == ord("s"):
+                self.tello.back(20)
             elif key == ord("d"):
-                self.tello.move_down(self.distance)
-            elif key == ord("l"):
+                self.tello.cw(30)
+            elif key == ord('l'):
                 self.tello.land()
+            elif key == ord('e'):
+                self.tello.emergency()
+            else:
+                if key != 255:
+                    print('unused key:{}'.format(key))
 
-            # if key == ord("q"):
-            #     break
-            # elif key == ord("t"):q
-            #     self.tello.takeoff()
-            # # elif key == ord("u"):
-            # #     self.tello.move_up(0.5)
-            # # elif key == ord("d"):
-            # #     self.tello.move_down(0.5)
-            # elif key == ord("l"):
-            #     self.tello.land()
-            # elif key == ord("s"):
-            #     self.tello.get_speed()
-            # elif key == ord("f"):
-            #     self.tello.move_forward(0.5)
-            # elif key == ord("b"):
-            #     self.tello.move_backward(0.5)
+            # check to see if we should write the frame to disk
+            if writer is not None:
+                writer.write(frame)
+
             # elif key == ord("u"):
             #     self.foward_speed += 10
             #     self.tello.set_control(self.horizontal_speed, self.foward_speed, self.accelerator, self.rotate)
@@ -273,33 +317,34 @@ class TelloTracker:
         cv2.destroyAllWindows()
         self._close()
 
-    def _pid_init_lasttime(self):
-        self.foward_pid.init_last_time()
-        self.rotate_pid.init_last_time()
 
-    def _pid_clear(self):
-        self.foward_pid.clear()
-        self.rotate_pid.clear()
-
-    def _sendingCommand(self):
-        """
-        start a while loop that sends 'command' to tello every 60 second
-        """
-
-        while True:
-            self.tello.get_battery()
-            # self.tello.send_command('command')
-            time.sleep(30)
+class dumy_tello():
+    def __init__(self):
+        self.frame = np.random.randn(300, 300)
 
 
 if __name__ == '__main__':
-    # detect_model = darknet
-    tracker = TelloTracker(darknet, tello.Tello('', 8889), output_video='test7.mp4')
+    # logging.basicConfig(level=logging.INFO)
+    # logger = logging.getLogger('track_demo')
 
-    tracker.track()
-    # while True:
-    #     tracker.show_frame('frame')
-    #     key = cv2.waitKey(1) & 0xFF
-    #     if key == ord("q"):
-    #         tracker.close()
-    #         break
+    PATH_TO_LABELS = 'export/label_map.pbtxt'
+    category_index = label_map_util.create_category_index_from_labelmap(PATH_TO_LABELS, use_display_name=True)
+
+    detection_model = load_model()
+    print('---warming up detection model---')
+    run_inference_for_single_image(detection_model, cv2.imread('./test_images/IMG_20200428_144451.jpg'))
+
+    detection_model = DetectionModel(detection_model, category_index)
+
+    tello = Tello()
+    tello.command()
+    tello.streamon()
+    # tello.get_battery()
+    # a = dumy_tello()
+    # a.frame = np.random.randn(300, 300)
+    tello_tracker = TelloTracker(detection_model, tello, output_video='out.mp4')
+    try:
+        tello_tracker.track(verbose=True)
+    except Exception as e:
+        tello.emergency()
+        raise e

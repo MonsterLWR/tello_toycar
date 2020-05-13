@@ -26,10 +26,12 @@ class Tello:
 
         # easyTello runtime options
         self.stream_state = False
-        self.MAX_TIME_OUT = 15.0
+        self.MAX_TIME_OUT = 0.03
         self.debug = debug
         # Setting Tello to command mode
         self.command()
+
+        self.frame = None
 
     def send_command(self, command: str, query: bool = False):
         # New log entry created for the outbound command
@@ -50,8 +52,9 @@ class Tello:
                 print('Connection timed out!')
                 break
         # Prints out Tello response (if 'debug' is True)
-        if self.debug is True and query is False:
-            print('Response: {}'.format(self.log[-1].get_response()))
+        if self.debug is True:
+            if self.log[-1].got_response():
+                print('Response: {}'.format(self.log[-1].get_response()))
 
     def _receive_thread(self):
         while True:
@@ -62,20 +65,22 @@ class Tello:
             except socket.error as exc:
                 print('Socket error: {}'.format(exc))
 
-    def _video_thread(self):
+    def _video_thread(self, display=False):
         # Creating stream capture object
         cap = cv2.VideoCapture('udp://' + self.tello_ip + ':11111')
         # Runs while 'stream_state' is True
         while self.stream_state:
             ret, frame = cap.read()
-            cv2.imshow('DJI Tello', frame)
 
+            self.frame = frame
             # Video Stream is closed if escape key is pressed
-            k = cv2.waitKey(1) & 0xFF
-            if k == 27:
-                break
+            if display:
+                cv2.imshow('DJI Tello', frame)
+                k = cv2.waitKey(1) & 0xFF
+                if k == 27:
+                    break
         cap.release()
-        cv2.destroyAllWindows()
+        # cv2.destroyAllWindows()
 
     def wait(self, delay: float):
         # Displaying wait message (if 'debug' is True)
@@ -197,6 +202,17 @@ class Tello:
     def get_wifi(self):
         self.send_command('wifi?', True)
         return self.log[-1].get_response()
+
+    def control(self, horizontal_speed=0, foward_speed=0, accelerator=0, rotate=0):
+        """
+        设置遥控器的4个通道杆量
+        a: 横滚(-100~100)
+        b: 俯仰(-100~100)
+        c: 油门(-100~100)
+        d: 旋转(-100~100)
+        """
+        self.rc_control(horizontal_speed, foward_speed, accelerator, rotate)
+        # return self.send_command('rc %d %d %d %d' % (horizontal_speed, foward_speed, accelerator, rotate), False)
 
 
 if __name__ == '__main__':

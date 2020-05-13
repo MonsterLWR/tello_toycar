@@ -20,11 +20,11 @@ class SimpleMultiTracker:
         # self.template_denominator = {}
         # self.template_numerator = {}
         # self.last_frame = None
-        self.filter_size = kwargs.setdefault('filter_size', (64, 64))
+        # self.filter_size = kwargs.setdefault('filter_size', (64, 64))
         # cv2.imshow('g', gauss_response(self.filter_size[0], self.filter_size[1]))
 
-        self.maxDistance = kwargs.setdefault('maxDistance', 100)
-        self.maxDisappear = kwargs.setdefault('maxDisappear', 3)
+        self.maxDistance = kwargs.setdefault('maxDistance', 200)
+        self.maxDisappear = kwargs.setdefault('maxDisappear', 6)
         self.areaThreshold = kwargs.setdefault('areaThreshold', 50)
         # psr为8可能是追踪目标，也可能不是追踪目标。结合距离来判断是否为追踪目标。
         # self.psrThreshold = kwargs.setdefault('psrThreshold', 7.0)
@@ -40,7 +40,7 @@ class SimpleMultiTracker:
 
         self.tracker_type = tracker_type
 
-        self.debug = kwargs.setdefault('debug', False)
+        self.debug = kwargs.setdefault('debug', True)
 
         OPENCV_OBJECT_TRACKERS = {
             "csrt": cv2.TrackerCSRT_create,
@@ -51,8 +51,10 @@ class SimpleMultiTracker:
             "medianflow": cv2.TrackerMedianFlow_create,
             "mosse": cv2.TrackerMOSSE_create
         }
-        self.new_tracker = OPENCV_OBJECT_TRACKERS[tracker_type]
+        self.tracker = OPENCV_OBJECT_TRACKERS[tracker_type]
 
+        self.single_tracker = None
+        self.single_tracker_id = None
         # self.pool = multiprocessing.Pool()
 
     def __register(self, frame, box):
@@ -67,6 +69,19 @@ class SimpleMultiTracker:
         self.boxes[self.nextTrackerID] = box
         # self.counts[self.nextTrackerID] = self.safeUpdateCount
         self.nextTrackerID += 1
+
+    def init_single_tracker(self, trackerID, frame):
+        self.single_tracker = self.tracker()
+        self.single_tracker.init(frame, convert_to_wh_box(self.boxes[trackerID]))
+        self.single_tracker_id = trackerID
+
+    def update_single_tracker(self, frame):
+        # this function won't affect disappear variable
+        if self.single_tracker_id in self.tracked.keys():
+            success, box = self.single_tracker.update(frame)
+            if success:
+                self.boxes[self.single_tracker_id] = convert_from_wh_box(box)
+                self.tracked[self.single_tracker_id] = True
 
     def __renew_tracker(self, trackerID, frame, box):
         """重置tracker"""
@@ -99,62 +114,40 @@ class SimpleMultiTracker:
 
         return self.appearing_boxes()
 
-    # def update_after_detection(self, frame, boxes):
-    #     """检测算法之后进行的update"""
-    #     boxes = discard_boxes(boxes, self.areaThreshold, frame.shape[0], frame.shape[1])
-    #     # 未检测到目标
-    #     if len(boxes) == 0:
-    #         for ID in list(self.trackers.keys()):
-    #             self.disappear[ID] += 1
-    #             if self.disappear[ID] >= self.maxDisappear:
-    #                 # 超出设定的消失次数，销毁tracker
-    #                 self.__deregister(ID)
-    #         # self.last_frame = frame.copy()
-    #         return self.__appearing_boxes()
-    #
-    #     self.__update_tracker(frame, boxes)
-    #
-    #     # cv2.waitKey()
-    #
-    #     # self.last_frame = frame.copy()
-    #     return self.__appearing_boxes()
-
-    # def discard_unselected_IDs(self, selected_IDs):
-    #     for ID in list(self.trackers.keys()):
-    #         if ID not in selected_IDs:
-    #             self.__deregister(ID)
-
     def update_tracker(self, frame, boxes):
         existing_IDs = list(self.boxes.keys())
         existing_boxes = list(self.boxes.values())
         existing_centroids = compute_centroids(existing_boxes)
         input_centroids = compute_centroids(boxes)
 
+        unusedRows = range(len(existing_boxes))
+        unusedCols = range(len(boxes))
         # 计算目前的跟踪目标的中点和检测目标的中点的距离矩阵
         D = dist.cdist(existing_centroids, input_centroids)
-        # 根据每一行上的最小值对行索引进行排序
-        rows = np.min(D, axis=1).argsort()
-        # 得到每一行上最小值对应的列索引，并依据rows重新排序
-        cols = np.argmin(D, axis=1)[rows]
+        if D.size > 0:
+            # 根据每一行上的最小值对行索引进行排序
+            rows = np.min(D, axis=1).argsort()
+            # 得到每一行上最小值对应的列索引，并依据rows重新排序
+            cols = np.argmin(D, axis=1)[rows]
 
-        # self.__show_table(D, existing_IDs)
+            # self.__show_table(D, existing_IDs)
 
-        usedRows = set()
-        usedCols = set()
+            usedRows = set()
+            usedCols = set()
 
-        for (row, col) in zip(rows, cols):
-            if row in usedRows or col in usedCols:
-                continue
-            if D[row, col] > self.maxDistance:
-                continue
+            for (row, col) in zip(rows, cols):
+                if row in usedRows or col in usedCols:
+                    continue
+                if D[row, col] > self.maxDistance:
+                    continue
 
-            self.__renew_tracker(existing_IDs[row], frame, boxes[col])
+                self.__renew_tracker(existing_IDs[row], frame, boxes[col])
 
-            usedRows.add(row)
-            usedCols.add(col)
+                usedRows.add(row)
+                usedCols.add(col)
 
-        unusedRows = set(range(0, D.shape[0])).difference(usedRows)
-        # unusedCols = set(range(0, D.shape[1])).difference(usedCols)
+            unusedRows = set(range(0, D.shape[0])).difference(usedRows)
+            unusedCols = set(range(0, D.shape[1])).difference(usedCols)
 
         # 没有对应检测到的目标 的tracker
         for row in unusedRows:
@@ -164,19 +157,25 @@ class SimpleMultiTracker:
                 # 超出设定的消失次数，销毁tracker
                 self.__deregister(ID)
 
-    # def update_trackers(self, frame):
-    #     """使用tracker追踪目标"""
-    #     gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    #     for (ID, tracker) in self.trackers.items():
-    #         (success, box) = tracker.update(frame)
-    #         # print(success, box)
-    #         if success:
-    #             self.boxes[ID] = clip_box(convert_from_wh_box(box), frame.shape[0], frame.shape[1])
-    #             self.tracked[ID] = True
-    #         else:
-    #             # 追踪失败
-    #             self.tracked[ID] = False
-    #     # self.last_frame = frame.copy()
+        # 注册新的目标
+        unusedCols = list(unusedCols)
+        for col in unusedCols:
+            box = boxes[col]
+            self.__register(frame, box)
+
+        # def update_trackers(self, frame):
+        #     """使用tracker追踪目标"""
+        #     gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        #     for (ID, tracker) in self.trackers.items():
+        #         (success, box) = tracker.update(frame)
+        #         # print(success, box)
+        #         if success:
+        #             self.boxes[ID] = clip_box(convert_from_wh_box(box), frame.shape[0], frame.shape[1])
+        #             self.tracked[ID] = True
+        #         else:
+        #             # 追踪失败
+        #             self.tracked[ID] = False
+        #     # self.last_frame = frame.copy()
         return self.appearing_boxes()
 
     def appearing_boxes(self):
@@ -185,6 +184,12 @@ class SimpleMultiTracker:
             if tracked:
                 boxes[ID] = self.boxes[ID]
         return boxes
+
+    def appearing_tracking_box(self):
+        if self.single_tracker_id in self.tracked.keys() and self.tracked[self.single_tracker_id]:
+            return self.boxes[self.single_tracker_id]
+        else:
+            return None
 
     def show_info(self, mes_title):
         print('--------------------{}--------------------'.format(mes_title))

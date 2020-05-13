@@ -31,10 +31,12 @@ class Stats:
         return num_val
 
     def int_response(self, data: str):
-        return int(self.numeric_response(data))
+        if len(data) > 0:
+            return int(self.numeric_response(data))
 
     def float_response(self, data: str):
-        return float(self.numeric_response(data))
+        if len(data) > 0:
+            return float(self.numeric_response(data))
 
     def attitude_response(self):
         raw_att = self.response.split(';')
@@ -52,6 +54,8 @@ class Stats:
         return temp
 
     def get_response(self):
+        if self.response is None or len(self.response) == 0:
+            return 'no response'
         if 'attitude?' in self.command:
             return self.attitude_response()
         elif 'acceleration?' in self.command:

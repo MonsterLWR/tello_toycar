@@ -12,9 +12,14 @@ from detection import DetectionModel, load_model, run_inference_for_single_image
 import tensorflow as tf
 import logging
 
+WAIT = 0
+DETECTING = 1
+TRACKING = 2
+INPUTTING = 3
 
-def track(detection_model, class_set, input_vedio=None, output_vedio=None, frame_width=500, skip_frames=2,
-          confidence=0.4, verbose=True ):
+
+def track(detection_model, class_set, input_vedio=None, output_vedio=None, frame_width=400, skip_frames=2,
+          confidence=0.4, verbose=True):
     if input_vedio is None:
         print("[INFO] starting video stream...")
         vs = VideoStream(src=0).start()
@@ -23,24 +28,23 @@ def track(detection_model, class_set, input_vedio=None, output_vedio=None, frame
         print("[INFO] opening video file...")
         vs = cv2.VideoCapture(input_vedio)
 
-    # initialize the frame dimensions
     W = None
     H = None
-
-    # 初始化视频输出对象
     writer = None
-
-    multi_tracker = SimpleMultiTracker(debug=verbose)
-    # trackableObjects = {}
-
-    # initialize the total number of frames processed thus far
-    totalFrames = 0
-
-    # start the frames per second throughput estimator
     fps = None
+    track_id = None
 
-    tracking = False
+    # if we are supposed to be writing a video to disk, initialize
+    # the writer
+    if output_vedio is not None and writer is None:
+        fourcc = cv2.VideoWriter_fourcc(*"MP4V")
+        writer = cv2.VideoWriter(output_vedio, fourcc, 30,
+                                 (W, H), True)
 
+    totalFrames = 0
+    display_str = 'waiting'
+    mode = WAIT
+    multi_tracker = SimpleMultiTracker(debug=verbose)
     # loop over frames from the video stream
     while True:
         # grab the next frame and handle if we are reading from either
@@ -61,14 +65,7 @@ def track(detection_model, class_set, input_vedio=None, output_vedio=None, frame
             (H, W) = frame.shape[:2]
             # detection_model.performDetect(None, initOnly=True)
 
-        # if we are supposed to be writing a video to disk, initialize
-        # the writer
-        if output_vedio is not None and writer is None:
-            fourcc = cv2.VideoWriter_fourcc(*"MP4V")
-            writer = cv2.VideoWriter(output_vedio, fourcc, 30,
-                                     (W, H), True)
-
-        if tracking:
+        if mode != WAIT:
             # check to see if we should run a more computationally expensive
             # object detection method to aid our tracker
             if totalFrames % skip_frames == 0:
@@ -78,21 +75,26 @@ def track(detection_model, class_set, input_vedio=None, output_vedio=None, frame
                 # loop over the detections
                 boxes = []
                 for i in range(len(scores)):
-                    # filter out weak detections by requiring a minimum onfidence
                     if scores[i] > confidence:
-                        # if the class label is not a person, ignore it
                         if classes[i] in class_set:
                             boxes.append(raw_boxes[i])
 
                 if totalFrames == 0:
                     rects = multi_tracker.init_tracker(frame, boxes)
                 else:
-                    # cv2.waitKey()
                     rects = multi_tracker.update_tracker(frame, boxes)
+
+                if mode == TRACKING:
+                    if multi_tracker.tracked[track_id]:
+                        # if tracked after detection, init a new single tracker
+                        multi_tracker.init_single_tracker(track_id, frame)
+                    else:
+                        multi_tracker.update_single_tracker(frame)
             # otherwise, we should utilize our object *trackers* rather than
             # object *detectors* to obtain a higher frame processing throughput
             else:
-                # loop over the trackers
+                if mode == TRACKING:
+                    multi_tracker.update_single_tracker(frame)
                 rects = multi_tracker.appearing_boxes()
 
             if rects is not None:
@@ -128,25 +130,39 @@ def track(detection_model, class_set, input_vedio=None, output_vedio=None, frame
             if verbose:
                 multi_tracker.show_info('Frame{}'.format(totalFrames))
 
-        # check to see if we should write the frame to disk
         if writer is not None:
             writer.write(frame)
 
-        # show the output frame
+        cv2.putText(frame, display_str, (0, 30), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 2)
         cv2.imshow("Frame", frame)
-        if not tracking:
-            key = cv2.waitKey(20) & 0xFF
+
+        if mode == WAIT:
+            key = cv2.waitKey(33) & 0xFF
         else:
             key = cv2.waitKey(1) & 0xFF
 
         # if the `q` key was pressed, break from the loop
         if key == ord("q"):
             break
-        elif key == ord("s"):
-            tracking = True
-
-        # if not tracking:
-        #     cv2.waitKey(10)
+        elif key == ord("d"):
+            mode = DETECTING
+            display_str = 'DETECTING'
+        elif key == 13:
+            # enter key
+            if mode == DETECTING:
+                mode = INPUTTING
+                display_str = 'INPUTTING:'
+            elif mode == INPUTTING:
+                track_id = int(display_str.split(':')[-1])
+                mode = TRACKING
+                display_str = 'TRACKING:{}'.format(track_id)
+                multi_tracker.init_single_tracker(track_id, frame)
+        elif ord('0') <= key <= ord('9') and mode == INPUTTING:
+            num = key - ord('0')
+            display_str += str(num)
+        else:
+            if key != 255:
+                print('unused key:{}'.format(key))
 
     # stop the timer and display FPS information
     if fps is not None:
@@ -183,4 +199,4 @@ if __name__ == '__main__':
 
     detection_model = DetectionModel(detection_model, category_index)
 
-    track(detection_model, ['toycar'], 'test.mp4', 'out.mp4', skip_frames=1)
+    track(detection_model, ['toycar'], 'test.mp4', 'out.mp4', skip_frames=3, verbose=False)

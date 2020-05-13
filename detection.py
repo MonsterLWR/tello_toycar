@@ -5,7 +5,6 @@ import tensorflow as tf
 from matplotlib import pyplot as plt
 from PIL import Image
 
-
 from object_detection.utils import ops as utils_ops
 from object_detection.utils import label_map_util
 from object_detection.utils import visualization_utils as vis_util
@@ -119,6 +118,7 @@ def show_inference(model, image_path):
     image_np = np.array(Image.open(image_path))
     # Actual detection.
     output_dict = run_inference_for_single_image(model, image_np)
+    print(output_dict)
     # Visualization of the results of a detection.
     vis_util.visualize_boxes_and_labels_on_image_array(
         image_np,
@@ -151,17 +151,22 @@ if __name__ == '__main__':
     print(detection_model.inputs)
     # detection_model.output_dtypes
     # detection_model.output_shapes
-
-    image_nps = []
-    for image_path in TEST_IMAGE_PATHS:
-        image_nps.append(show_inference(detection_model, image_path))
-
-    ax1 = plt.subplot(121)
-    ax2 = plt.subplot(122)
-
-    plt.axes(ax1)
-    plt.imshow(image_nps[0])
-    plt.axes(ax2)
-    plt.imshow(image_nps[1])
-
+    image_path = 'test_images/test.JPG'
+    image = show_inference(detection_model, image_path)
+    plt.imshow(image)
     plt.show()
+
+    # run_inference_for_single_image()
+    # image_nps = []
+    # for image_path in TEST_IMAGE_PATHS:
+    #     image_nps.append(show_inference(detection_model, image_path))
+    #
+    # ax1 = plt.subplot(121)
+    # ax2 = plt.subplot(122)
+    #
+    # plt.axes(ax1)
+    # plt.imshow(image_nps[0])
+    # plt.axes(ax2)
+    # plt.imshow(image_nps[1])
+    #
+    # plt.show()

@@ -23,9 +23,10 @@ class SimpleMultiTracker:
         # self.filter_size = kwargs.setdefault('filter_size', (64, 64))
         # cv2.imshow('g', gauss_response(self.filter_size[0], self.filter_size[1]))
 
-        self.maxDistance = kwargs.setdefault('maxDistance', 200)
-        self.maxDisappear = kwargs.setdefault('maxDisappear', 6)
+        self.maxDistance = kwargs.setdefault('maxDistance', 150)
+        self.maxDisappear = kwargs.setdefault('maxDisappear', 15)
         self.areaThreshold = kwargs.setdefault('areaThreshold', 50)
+        self.appearing_thresh = kwargs.setdefault('appearing_thresh', 3)
         # psr为8可能是追踪目标，也可能不是追踪目标。结合距离来判断是否为追踪目标。
         # self.psrThreshold = kwargs.setdefault('psrThreshold', 7.0)
         # 用于判断追踪的是否是同一目标
@@ -181,12 +182,14 @@ class SimpleMultiTracker:
     def appearing_boxes(self):
         boxes = {}
         for ID, tracked in self.tracked.items():
-            if tracked:
+            if tracked and self.disappear[ID] <= self.appearing_thresh:
                 boxes[ID] = self.boxes[ID]
         return boxes
 
     def appearing_tracking_box(self):
-        if self.single_tracker_id in self.tracked.keys() and self.tracked[self.single_tracker_id]:
+        if self.single_tracker_id in self.tracked.keys() \
+                and self.tracked[self.single_tracker_id] \
+                and self.disappear[self.single_tracker_id] <= self.appearing_thresh:
             return self.boxes[self.single_tracker_id]
         else:
             return None

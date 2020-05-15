@@ -34,13 +34,6 @@ def track(detection_model, class_set, input_vedio=None, output_vedio=None, frame
     fps = None
     track_id = None
 
-    # if we are supposed to be writing a video to disk, initialize
-    # the writer
-    if output_vedio is not None and writer is None:
-        fourcc = cv2.VideoWriter_fourcc(*"MP4V")
-        writer = cv2.VideoWriter(output_vedio, fourcc, 30,
-                                 (W, H), True)
-
     totalFrames = 0
     display_str = 'waiting'
     mode = WAIT
@@ -64,6 +57,13 @@ def track(detection_model, class_set, input_vedio=None, output_vedio=None, frame
         if W is None or H is None:
             (H, W) = frame.shape[:2]
             # detection_model.performDetect(None, initOnly=True)
+
+        # if we are supposed to be writing a video to disk, initialize
+        # the writer
+        if output_vedio is not None and writer is None:
+            fourcc = cv2.VideoWriter_fourcc(*"MP4V")
+            writer = cv2.VideoWriter(output_vedio, fourcc, 30,
+                                     (W, H), True)
 
         if mode != WAIT:
             # check to see if we should run a more computationally expensive
@@ -199,4 +199,4 @@ if __name__ == '__main__':
 
     detection_model = DetectionModel(detection_model, category_index)
 
-    track(detection_model, ['toycar'], 'test.mp4', 'out.mp4', skip_frames=3, verbose=False)
+    track(detection_model, ['toycar'], 'test.mp4', 'out1.mp4', skip_frames=3, verbose=False)

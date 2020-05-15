@@ -18,7 +18,7 @@ INPUTTING = 3
 
 
 class TelloTracker:
-    def __init__(self, detect_model, tello, frame_width=768, skip_frames=5, action_frames=10, confidence=0.4,
+    def __init__(self, detect_model, tello, frame_width=768, skip_frames=5, action_frames=5, confidence=0.4,
                  frame_rate=30, pool_size=30, class_set=['toycar'], output_video=None):
         self.detect_model = detect_model
         self.tello = tello
@@ -33,14 +33,17 @@ class TelloTracker:
 
         # self.frame = None
         self.init_area = None
-        self.foward_pid = PID(setPoint=1.0, sample_time=0.3, P=50, I=10, D=20)
-        # self.foward_pid = PID(setPoint=0.5, sample_time=0.3, P=100, I=20, D=40)
-        self.rotate_pid = PID(setPoint=0.5, sample_time=0.3, P=150, I=30, D=60)
+        self.init_y_ratio = None
+        self.area_foward_pid = PID(setPoint=1.0, sample_time=0.1, P=50, I=0, D=0)
+        # self.foward_pid = PID(setPoint=1.0, sample_time=0.1, P=30, I=5, D=10)
+        self.rotate_pid = PID(setPoint=0.5, sample_time=0.1, P=100, I=20, D=30)
+        # self.rotate_pid = PID(setPoint=0.5, sample_time=0.1, P=150, I=30, D=60)
+        self.y_foward_pid = PID(setPoint=0.0, sample_time=0.1, P=100, I=20, D=30)
         self.frame_pool = Queue()
         self.stopEvent = threading.Event()
 
         self.horizontal_speed = 0
-        self.foward_speed = 0
+        self.forward_speed = 0
         self.accelerator = 0
         self.rotate = 0
 
@@ -102,11 +105,13 @@ class TelloTracker:
         return int(region)
 
     def _pid_init_lasttime(self):
-        self.foward_pid.init_last_time()
+        self.area_foward_pid.init_last_time()
+        self.y_foward_pid.init_last_time()
         self.rotate_pid.init_last_time()
 
     def _pid_clear(self):
-        self.foward_pid.clear()
+        self.area_foward_pid.clear()
+        self.y_foward_pid.clear()
         self.rotate_pid.clear()
 
     def _sendingCommand(self):
@@ -216,25 +221,34 @@ class TelloTracker:
                         (startX, startY, endX, endY) = box
                         area = (endX - startX) * (endY - startY)
 
+                        cX = (startX + endX) / 2.0
+                        cY = (startY + endY) / 2.0
+                        x_ratio = cX / width
+                        y_ratio = cY / height
+
                         if self.init_area is None:
                             # it's the first time to get a box, so we record it as a target for later use.
                             self.init_area = area
+                            self.init_y_ratio = y_ratio
                             self._pid_init_lasttime()
                         else:
                             # using pid algorithms to calculate a proper argument to send to tello
-                            cX = (startX + endX) / 2.0
-                            cY = (startY + endY) / 2.0
-                            x_ratio = cX / width
-                            y_ratio = cY / height
                             area_ratio = float(area) / float(self.init_area)
+                            y_error = y_ratio - self.init_y_ratio
 
                             cur_time = time.time()
-                            self.foward_speed = self.foward_pid.update(area_ratio, cur_time)
+                            area_forward_speed = self.area_foward_pid.update(area_ratio, cur_time)
+                            y_forward_speed = self.y_foward_pid.update(y_error, cur_time)
+                            self.forward_speed = 0.5 * area_forward_speed + y_forward_speed * 0.5
                             # self.foward_speed = self.foward_pid.update(y_ratio, cur_time)
                             self.rotate = self.rotate_pid.update(1 - x_ratio, cur_time)
 
-                            if self.foward_speed is not None and self.horizontal_speed is not None:
-                                self.tello.control(foward_speed=self._regionCheck(self.foward_speed),
+                            # too close to tracking object
+                            if endY > 0.9 * height and self.forward_speed > 0:
+                                self.forward_speed = -0.3 * self.forward_speed
+
+                            if self.forward_speed is not None and self.horizontal_speed is not None:
+                                self.tello.control(foward_speed=self._regionCheck(self.forward_speed),
                                                    rotate=self._regionCheck(self.rotate))
                     else:
                         # no tracking object, stop any moving
@@ -345,6 +359,9 @@ if __name__ == '__main__':
     tello_tracker = TelloTracker(detection_model, tello, output_video='out.mp4')
     try:
         tello_tracker.track(verbose=True)
+        tello.land()
+        time.sleep(0.75)
+        tello.emergency()
     except Exception as e:
         tello.emergency()
         raise e
